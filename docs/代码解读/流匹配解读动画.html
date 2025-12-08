@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>Flow Matching vs Diffusion (Slow & Clear)</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f0f2f5; display: flex; flex-direction: column; align-items: center; padding: 20px; }
+        .container { display: flex; gap: 30px; flex-wrap: wrap; justify-content: center; }
+        .canvas-wrapper { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); text-align: center; position: relative;}
+        canvas { border: 1px solid #ddd; background-color: #0d1117; border-radius: 8px; cursor: crosshair; }
+        h3 { margin-top: 0; color: #333; margin-bottom: 5px; }
+        .subtitle { font-size: 13px; color: #666; margin-bottom: 15px; height: 40px;}
+        
+        .controls-area { 
+            background: white; padding: 20px; border-radius: 12px; margin-top: 20px; 
+            box-shadow: 0 2px 10px rgba(0,0,0,0.05); width: 640px;
+            display: flex; flex-direction: column; gap: 15px;
+        }
+        .control-row { display: flex; align-items: center; gap: 15px; justify-content: center; }
+        
+        button { padding: 10px 25px; font-size: 16px; cursor: pointer; background-color: #0969da; color: white; border: none; border-radius: 6px; transition: background 0.2s; font-weight: 600;}
+        button:hover { background-color: #0752ad; }
+        button:disabled { background-color: #ccc; cursor: not-allowed; }
+        button.reset { background-color: #6e7781; }
+        button.reset:hover { background-color: #57606a; }
+
+        label { font-weight: 500; color: #444; }
+        input[type=range] { width: 200px; accent-color: #0969da; }
+
+        .legend { display: flex; gap: 20px; justify-content: center; font-size: 14px; color: #555; margin-top: 10px;}
+        .dot { width: 10px; height: 10px; display: inline-block; border-radius: 50%; margin-right: 5px; }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <!-- Diffusion Canvas -->
+        <div class="canvas-wrapper">
+            <h3>传统扩散模型 (Diffusion)</h3>
+            <div class="subtitle">路径弯曲且随机 (SDE)<br>像"醉汉回家"，跌跌撞撞</div>
+            <canvas id="canvasDiff" width="320" height="320"></canvas>
+        </div>
+
+        <!-- Flow Matching Canvas -->
+        <div class="canvas-wrapper">
+            <h3>OpenPi 流匹配 (Flow Matching)</h3>
+            <div class="subtitle">路径笔直且确定 (ODE)<br>像"高铁直达"，匀速直线</div>
+            <canvas id="canvasFlow" width="320" height="320"></canvas>
+        </div>
+    </div>
+
+    <div class="controls-area">
+        <div class="control-row">
+            <label>动画速度:</label>
+            <input type="range" id="speedRange" min="1" max="100" value="20">
+            <span id="speedVal" style="width: 40px;">20%</span>
+        </div>
+        <div class="control-row">
+            <button id="btnStart" onclick="toggleAnimation()">▶ 开始 / 暂停</button>
+            <button class="reset" onclick="resetAnimation()">↺ 重置</button>
+        </div>
+        <div class="legend">
+            <div><span class="dot" style="background:#58a6ff"></span>起点 (噪声)</div>
+            <div><span class="dot" style="background:#ff7b72"></span>终点 (数据)</div>
+            <div><span class="dot" style="background:#ffffff"></span>当前位置</div>
+        </div>
+        <div style="font-size: 13px; color: #666; text-align: center; margin-top:5px;">
+            提示：观察留下的<b>尾迹 (Trails)</b>。左边是乱的，右边是直的。
+        </div>
+    </div>
+
+    <script>
+        const canvasDiff = document.getElementById('canvasDiff');
+        const ctxDiff = canvasDiff.getContext('2d');
+        const canvasFlow = document.getElementById('canvasFlow');
+        const ctxFlow = canvasFlow.getContext('2d');
+        
+        const NUM_PARTICLES = 60; // Reduced for clarity
+        let particles = [];
+        let animationId = null;
+        let isPlaying = false;
+        let progress = 0; // 0 to 1
+        
+        // Configuration
+        const TRAIL_LENGTH = 500; // Keep long trails
+        
+        function randomNormal() {
+            let u = 0, v = 0;
+            while(u === 0) u = Math.random(); 
+            while(v === 0) v = Math.random();
+            return Math.sqrt( -2.0 * Math.log( u ) ) * Math.cos( 2.0 * Math.PI * v );
+        }
+
+        // Initialize particles
+        function initParticles() {
+            particles = [];
+            for(let i=0; i<NUM_PARTICLES; i++) {
+                // Target: A clear shape (Circle)
+                const angle = (i / NUM_PARTICLES) * Math.PI * 2;
+                const r = 90;
+                const targetX = 160 + Math.cos(angle) * r;
+                const targetY = 160 + Math.sin(angle) * r;
+
+                // Source: Gaussian Noise centered
+                // Random start positions
+                const startX = 160 + randomNormal() * 40;
+                const startY = 160 + randomNormal() * 40;
+
+                // Create a separate noise path for diffusion
+                // Pre-calculate a "wobbly" path for diffusion
+                let noisePath = [];
+                let currX = startX;
+                let currY = startY;
+                const steps = 100;
+                for(let s=0; s<=steps; s++) {
+                    let t = s/steps;
+                    // Linear base
+                    let lx = (1-t)*startX + t*targetX;
+                    let ly = (1-t)*startY + t*targetY;
+                    
+                    // Add noise bridge (zero at start, zero at end, high in middle)
+                    // Brownian bridge approximation
+                    if (t > 0 && t < 1) {
+                        let noiseAmp = 60 * Math.sqrt(t * (1-t)); 
+                        lx += randomNormal() * noiseAmp;
+                        ly += randomNormal() * noiseAmp;
+                    }
+                    noisePath.push({x: lx, y: ly});
+                }
+
+                particles.push({
+                    start: {x: startX, y: startY},
+                    target: {x: targetX, y: targetY},
+                    // History for trails
+                    historyDiff: [],
+                    historyFlow: [],
+                    // Current Pos
+                    posDiff: {x: startX, y: startY},
+                    posFlow: {x: startX, y: startY},
+                    noisePath: noisePath // Precomputed random path for consistent visual
+                });
+            }
+            draw();
+        }
+
+        function drawCanvas(ctx, type) {
+            // Clear with semi-transparent black for trail fade effect? No, let's keep trails solid for clarity.
+            ctx.fillStyle = '#0d1117';
+            ctx.fillRect(0, 0, 320, 320);
+
+            // Draw Target Outline (Ghostly)
+            ctx.strokeStyle = '#262c36';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(160, 160, 90, 0, Math.PI*2);
+            ctx.stroke();
+
+            particles.forEach(p => {
+                const history = type === 'diff' ? p.historyDiff : p.historyFlow;
+                const current = type === 'diff' ? p.posDiff : p.posFlow;
+                const colorTrail = type === 'diff' ? 'rgba(88, 166, 255, 0.3)' : 'rgba(255, 123, 114, 0.3)';
+                const colorHead = '#ffffff';
+
+                // 1. Draw Trail
+                if (history.length > 1) {
+                    ctx.beginPath();
+                    ctx.strokeStyle = colorTrail;
+                    ctx.lineWidth = 2;
+                    ctx.moveTo(history[0].x, history[0].y);
+                    for (let i = 1; i < history.length; i++) {
+                        ctx.lineTo(history[i].x, history[i].y);
+                    }
+                    ctx.lineTo(current.x, current.y);
+                    ctx.stroke();
+                }
+
+                // 2. Draw Start Point (Ghost)
+                ctx.fillStyle = 'rgba(255,255,255,0.1)';
+                ctx.beginPath();
+                ctx.arc(p.start.x, p.start.y, 2, 0, Math.PI*2);
+                ctx.fill();
+
+                // 3. Draw Current Head
+                ctx.fillStyle = colorHead;
+                ctx.beginPath();
+                ctx.arc(current.x, current.y, 3, 0, Math.PI*2);
+                ctx.fill();
+            });
+
+            // Draw Time Label
+            ctx.fillStyle = '#8b949e';
+            ctx.font = '14px monospace';
+            ctx.fillText(`t = ${progress.toFixed(2)}`, 10, 310);
+        }
+
+        function draw() {
+            drawCanvas(ctxDiff, 'diff');
+            drawCanvas(ctxFlow, 'flow');
+        }
+
+        function update() {
+            if (!isPlaying) return;
+
+            // Get speed from slider (0.001 to 0.02 increment)
+            const speedVal = parseInt(document.getElementById('speedRange').value);
+            const increment = speedVal / 5000; 
+
+            progress += increment;
+
+            if (progress >= 1.0) {
+                progress = 1.0;
+                isPlaying = false;
+                document.getElementById('btnStart').innerText = "↺ 重放";
+            }
+
+            particles.forEach(p => {
+                // --- Flow Matching: Exact Linear Interpolation ---
+                const flowX = (1 - progress) * p.start.x + progress * p.target.x;
+                const flowY = (1 - progress) * p.start.y + progress * p.target.y;
+                
+                // Update Flow Particle
+                if (progress < 1.0 || p.historyFlow.length === 0) { // Avoid adding dupes at end
+                     // Only add to history periodically to save perf if needed, but here every frame is smooth
+                     p.historyFlow.push({x: p.posFlow.x, y: p.posFlow.y});
+                }
+                p.posFlow.x = flowX;
+                p.posFlow.y = flowY;
+
+                // --- Diffusion: Sample from precomputed noisy path ---
+                // Map progress (0-1) to path index (0-100)
+                const pathIdx = Math.min(100, Math.floor(progress * 100));
+                // Linear interpolate between path points for smoothness
+                const idxFloat = progress * 100;
+                const idxLow = Math.floor(idxFloat);
+                const idxHigh = Math.min(100, idxLow + 1);
+                const ratio = idxFloat - idxLow;
+
+                const pLow = p.noisePath[idxLow];
+                const pHigh = p.noisePath[Math.min(100, idxHigh)]; // clamp
+
+                if (pLow && pHigh) {
+                    const diffX = pLow.x * (1-ratio) + pHigh.x * ratio;
+                    const diffY = pLow.y * (1-ratio) + pHigh.y * ratio;
+                    
+                    p.historyDiff.push({x: p.posDiff.x, y: p.posDiff.y});
+                    p.posDiff.x = diffX;
+                    p.posDiff.y = diffY;
+                }
+            });
+
+            draw();
+
+            if (isPlaying) {
+                requestAnimationFrame(update);
+            }
+        }
+
+        function toggleAnimation() {
+            if (progress >= 1.0) {
+                resetAnimation();
+                return;
+            }
+            
+            isPlaying = !isPlaying;
+            const btn = document.getElementById('btnStart');
+            btn.innerText = isPlaying ? "⏸ 暂停" : "▶ 继续";
+            
+            if (isPlaying) {
+                update();
+            }
+        }
+
+        function resetAnimation() {
+            isPlaying = false;
+            progress = 0;
+            document.getElementById('btnStart').innerText = "▶ 开始";
+            initParticles(); // Resets history and noise paths
+        }
+
+        // Speed Slider Listener
+        document.getElementById('speedRange').addEventListener('input', (e) => {
+            document.getElementById('speedVal').innerText = e.target.value + '%';
+        });
+
+        // Initialize
+        initParticles();
+
+    </script>
+</body>
+</html>
